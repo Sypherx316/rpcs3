@@ -526,11 +526,11 @@ namespace rsx
 
 			_max_index = 0;
 
-			const auto re_evaluate = [&] <typename T> (const std::byte* ptr, T)
+			const auto re_evaluate = [&] <typename T> (const std::byte* ptr, u32 element_count, T)
 			{
 				const u64 restart = rsx::method_registers.restart_index_enabled() ? rsx::method_registers.restart_index() : u64{umax};
 
-				for (u32 _index = first; _index < first + count; _index++)
+				for (u32 _index = 0; _index < element_count; _index++)
 				{
 					const auto value = read_from_ptr_unsafe<be_t<T>>(ptr, _index * sizeof(T));
 
@@ -551,31 +551,30 @@ namespace rsx
 				}
 			};
 
+			// NOTE: The index array is addressed by element position within the draw range.
+			// [first, first + count) are vertex index values and have nothing to do with element positions. See get_raw_index_array().
 			const auto element_push_buffer = render->draw_processor()->element_push_buffer();
-			if (index_size == 4)
+			if (!element_push_buffer.empty()) [[unlikely]]
 			{
-				if (!element_push_buffer.empty()) [[unlikely]]
-				{
-					// Indices provided via immediate mode
-					re_evaluate(reinterpret_cast<const std::byte*>(element_push_buffer.data()), u32{});
-				}
-				else
-				{
-					const u32 address = (0 - index_size) & get_address(rsx::method_registers.index_array_address(), rsx::method_registers.index_array_location());
-					re_evaluate(vm::get_super_ptr<std::byte>(address), u32{});
-				}
+				// Indices provided via immediate mode, always u32 and never offset into the index array
+				re_evaluate(reinterpret_cast<const std::byte*>(element_push_buffer.data()), ::size32(element_push_buffer), u32{});
 			}
 			else
 			{
-				if (!element_push_buffer.empty()) [[unlikely]]
+				const auto& draw_clause = rsx::method_registers.current_draw_clause;
+
+				// Force aligned indices as realhw
+				const u32 address = (0 - index_size) & get_address(rsx::method_registers.index_array_address(), rsx::method_registers.index_array_location());
+				const std::byte* const ptr = vm::get_super_ptr<std::byte>(address) + draw_clause.min_index() * index_size;
+				const u32 element_count = draw_clause.get_elements_count();
+
+				if (index_size == 4)
 				{
-					// Indices provided via immediate mode
-					re_evaluate(reinterpret_cast<const std::byte*>(element_push_buffer.data()), u16{});
+					re_evaluate(ptr, element_count, u32{});
 				}
 				else
 				{
-					const u32 address = (0 - index_size) & get_address(rsx::method_registers.index_array_address(), rsx::method_registers.index_array_location());
-					re_evaluate(vm::get_super_ptr<std::byte>(address), u16{});
+					re_evaluate(ptr, element_count, u16{});
 				}
 			}
 
