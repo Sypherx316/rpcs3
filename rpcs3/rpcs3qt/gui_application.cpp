@@ -112,7 +112,7 @@ int gui_application::exec()
 		func();
 	};
 
-	if (!rpcs3::is_release_build() && !rpcs3::is_local_build())
+	if (false) // Sin aviso de build experimental (fix-thebigs2)
 	{
 		steps->push_back([this]()
 		{
