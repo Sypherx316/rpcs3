@@ -12,7 +12,7 @@ import re
 UPDATE_JSON = "https://github.com/Sypherx316/rpcs3/releases/latest/download/update.json"
 
 
-def patch(path, marker, pattern, replacement, what):
+def patch(path, marker, pattern, replacement, what, expected=1):
     if not os.path.exists(path):
         print(f"::warning::{path} not found, {what} not changed")
         return
@@ -22,8 +22,8 @@ def patch(path, marker, pattern, replacement, what):
         print(f"{what}: already done")
         return
     nl = "\r\n" if "\r\n" in text else "\n"
-    text, count = re.subn(pattern, lambda m: replacement(m).replace("\n", nl), text, count=1, flags=re.M)
-    if count != 1:
+    text, count = re.subn(pattern, lambda m: replacement(m).replace("\n", nl), text, count=expected, flags=re.M)
+    if count != expected:
         print(f"::warning::{what}: code not found, left as it is")
         return
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -35,6 +35,13 @@ patch("rpcs3/rpcs3qt/gui_application.cpp", "No experimental build dialog",
       r"if \(!rpcs3::is_release_build\(\) && !rpcs3::is_local_build\(\)\)",
       lambda m: "if (false) // No experimental build dialog (thebigs2-fix)",
       "experimental build dialog")
+
+# Windows (MSVC) builds of a fork get only the commit hash as version, not "count-hash" like the
+# official and Linux ones: the updater needs the build number to compare
+patch("Utilities/git-version-gen.cmd", "thebigs2-fix",
+      r"do set GIT_VERSION=%%I(?=\r?$)",
+      lambda m: "do set GIT_VERSION=%COMMIT_COUNT%-%%I& rem thebigs2-fix: count-hash on fork builds too",
+      "Windows version with build number", expected=2)
 
 updater = "rpcs3/rpcs3qt/update_manager.cpp"
 
@@ -77,8 +84,12 @@ patch(updater, "thebigs2_update_answer(",
                 "\tcurrent[\"version\"] = QStringLiteral(\"%1-%2\").arg(latest[\"version\"].toString().section('-', 0, 0)).arg(current_build);\n"
                 "\tcurrent[\"datetime\"] = current_date.toString(date_fmt);\n"
                 "\n"
+                "\t// The newest Release's own commit is up to date whatever its build number reads\n"
+                "\tconst std::string latest_commit = latest[\"commit\"].toString().toStdString();\n"
+                "\tconst bool same_commit = !latest_commit.empty() && rpcs3::get_version().to_string().find(latest_commit) != umax;\n"
+                "\n"
                 "\tjson[\"current_build\"] = current;\n"
-                "\tjson[\"return_code\"] = latest_build > current_build ? 1 : 0;\n"
+                "\tjson[\"return_code\"] = latest_build > current_build && !same_commit ? 1 : 0;\n"
                 "\treturn json;\n"
                 "}\n"
                 "\n" + m.group(0),
