@@ -1,0 +1,319 @@
+# Automatic chain, part 1. Every 4 hours it asks RPCS3's update server for the newest official
+# build; when that version has no Release here yet, it builds it for Windows x64 (MSVC, like the
+# official one) and Linux x64 (clang AppImage: Batocera, Bazzite) with the The Bigs 2 fix
+# (RPCS3 #17741, digant73's 5cdab28), without the experimental build warning and without the
+# official updater, and publishes both as a Release. The PS5 build (a private repository) and the
+# Windows/Batocera updaters take it from there.
+#
+# Run workflow, or Re-run all jobs, checks again for the newest build. "force" rebuilds the
+# version even when its Release already exists. The build settings are read from that RPCS3
+# revision's own rpcs3.yml, so they follow upstream.
+name: RPCS3 + The Bigs 2 fix (Windows + Linux)
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  schedule:
+    - cron: "23 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this version already has a Release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: thebigs2-auto
+
+jobs:
+  resolve:
+    name: Look for a new RPCS3 build
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.find.outputs.build }}
+      sha: ${{ steps.find.outputs.sha }}
+      version: ${{ steps.find.outputs.version }}
+      tag: ${{ steps.find.outputs.tag }}
+      docker_img: ${{ steps.find.outputs.docker_img }}
+      build_sh: ${{ steps.find.outputs.build_sh }}
+      winrunner: ${{ steps.find.outputs.winrunner }}
+      winenv: ${{ steps.find.outputs.winenv }}
+    steps:
+      - name: Keep the schedule on
+        # GitHub turns schedules off after 60 days without commits; enabling the workflow resets that
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/thebigs2-auto.yml/enable" || true
+
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          # The same endpoint RPCS3's updater asks; c is any known commit
+          json=$(curl -fsSL --retry 3 "https://update.rpcs3.net/?api=v3&os_type=linux&os_arch=x64&c=55a3aff3")
+          version=$(jq -r .latest_build.version <<< "$json")
+          sha=$(jq -r .latest_build.linux.download <<< "$json" | grep -oE 'build-[0-9a-f]{40}' | cut -d- -f2)
+          [[ $sha =~ ^[0-9a-f]{40}$ && $version =~ ^[0-9.]+-[0-9]+$ ]] || { echo "could not read the newest RPCS3 build"; exit 1; }
+          tag="v$version-thebigs2"
+
+          build=true
+          if [[ $FORCE != true ]] && gh release view "$tag" -R "${{ github.repository }}" > /dev/null 2>&1; then
+            build=false
+            echo "RPCS3 $version already has a Release ($tag): nothing to do" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/RPCS3/rpcs3/$sha/.github/workflows/rpcs3.yml" -o rpcs3.yml
+          job='.jobs.Linux_Build.strategy.matrix.include[] | select(.os == "ubuntu-24.04" and .compiler == "clang")'
+          docker_img=$(yq "$job | .docker_img" rpcs3.yml)
+          [[ -n $docker_img && $docker_img != null ]] || { echo "could not find upstream's Linux build image"; exit 1; }
+          {
+            echo "build=$build"
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "docker_img=$docker_img"
+            echo "build_sh=$(yq "$job | .build_sh" rpcs3.yml)"
+            echo "winrunner=$(yq '.jobs.Windows_Build.runs-on' rpcs3.yml)"
+            echo "winenv=$(yq -o=json -I=0 '.jobs.Windows_Build.env' rpcs3.yml)"
+          } >> "$GITHUB_OUTPUT"
+          echo "RPCS3 $version ($sha), build=$build"
+
+  windows:
+    name: Windows x64 (RPCS3 ${{ needs.resolve.outputs.version }})
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ${{ needs.resolve.outputs.winrunner }}
+    timeout-minutes: 300
+    env:
+      BUILD_REPOSITORY_NAME: ${{ github.repository }}
+      BUILD_SOURCEBRANCHNAME: thebigs2-fix
+      BUILD_SOURCEVERSION: ${{ needs.resolve.outputs.sha }}
+      BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout RPCS3 ${{ needs.resolve.outputs.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: RPCS3/rpcs3
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Checkout the patch scripts
+        uses: actions/checkout@v4
+        with:
+          path: _thebigs2
+          sparse-checkout: .github/thebigs2
+
+      - name: The Bigs 2 fix, no warning, no official updater
+        run: |
+          python _thebigs2/.github/thebigs2/fix_thebigs2.py rpcs3/Emu/RSX/RSXThread.cpp
+          python _thebigs2/.github/thebigs2/no_nags.py
+          git diff --stat
+          rm -rf _thebigs2
+
+      - name: Use upstream's Windows build settings
+        shell: pwsh
+        env:
+          WINENV: ${{ needs.resolve.outputs.winenv }}
+        run: |
+          $settings = $env:WINENV | ConvertFrom-Json
+          foreach ($p in $settings.PSObject.Properties) { "$($p.Name)=$($p.Value)" >> $env:GITHUB_ENV }
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore rpcs3.sln
+
+      - name: Setup env
+        shell: pwsh
+        run: |
+          echo "QTDIR=C:\Qt\${{ env.QT_VER }}\${{ env.QT_VER_MSVC }}_64" >> $env:GITHUB_ENV
+          echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VER }}" >> $env:GITHUB_ENV
+
+      - name: Get Cache Keys
+        run: .ci/get_keys-windows.sh
+
+      - name: Restore build Ccache
+        uses: actions/cache/restore@v4
+        id: restore-build-ccache
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: thebigs2-win-ccache-${{ github.run_id }}
+          restore-keys: thebigs2-win-ccache-
+
+      - name: Restore dependencies cache
+        uses: actions/cache/restore@v4
+        id: restore-dependencies-cache
+        with:
+          path: ${{ env.DEPS_CACHE_DIR }}
+          key: thebigs2-win-deps-${{ env.QT_VER }}-${{ env.VULKAN_SDK_SHA }}-${{ env.CCACHE_SHA }}-${{ hashFiles('llvm.lock') }}
+          restore-keys: thebigs2-win-deps-
+
+      - name: Download and unpack dependencies
+        run: |
+          .ci/setup-windows.sh
+          .ci/setup-windows-ci-vars.sh win64 msvc
+
+      - name: Export Variables
+        run: |
+          while IFS='=' read -r key val; do
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < .ci/ci-vars.env
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Compile RPCS3
+        shell: pwsh
+        run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:CLToolPath=${{ env.CCACHE_BIN_DIR }} /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\buildfiles\msvc\ci_only.targets"
+
+      - name: Package as zip
+        # deploy-windows.sh adds the controller, compatibility and translation files to bin/;
+        # the zip (not its 7z) is what the Windows updater unpacks without extra tools
+        run: |
+          mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
+          .ci/deploy-windows.sh
+          mkdir -p release
+          7z a -tzip -mx7 "release/rpcs3-$VERSION-thebigs2-win64.zip" ./bin/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: release/
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Save build Ccache
+        if: always() && steps.restore-build-ccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
+
+      - name: Save dependencies cache
+        if: always() && steps.restore-dependencies-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DEPS_CACHE_DIR }}
+          key: ${{ steps.restore-dependencies-cache.outputs.cache-primary-key }}
+
+  linux:
+    name: Linux x64 AppImage (RPCS3 ${{ needs.resolve.outputs.version }})
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      BUILD_REPOSITORY_NAME: ${{ github.repository }}
+      BUILD_SOURCEBRANCHNAME: thebigs2-fix
+      BUILD_SOURCEVERSION: ${{ needs.resolve.outputs.sha }}
+      BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+      DEPLOY_APPIMAGE: true
+      APPDIR: /rpcs3/build/appdir
+      ARTDIR: /root/artifacts
+      RELEASE_MESSAGE: /rpcs3/GitHubReleaseMessage.txt
+      COMPILER: clang
+      RUN_UNIT_TESTS: "OFF"
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout RPCS3 ${{ needs.resolve.outputs.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: RPCS3/rpcs3
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Checkout the patch scripts
+        uses: actions/checkout@v4
+        with:
+          path: _thebigs2
+          sparse-checkout: .github/thebigs2
+
+      - name: The Bigs 2 fix, no warning, no official updater
+        run: |
+          python3 _thebigs2/.github/thebigs2/fix_thebigs2.py rpcs3/Emu/RSX/RSXThread.cpp
+          python3 _thebigs2/.github/thebigs2/no_nags.py
+          git diff --stat
+          rm -rf _thebigs2
+
+      - name: Restore build Ccache
+        uses: actions/cache/restore@v4
+        id: restore-build-ccache
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: thebigs2-linux-ccache-${{ github.run_id }}
+          restore-keys: thebigs2-linux-ccache-
+
+      - name: Docker setup and build
+        run: |
+          mkdir -p "$CCACHE_DIR" "$BUILD_ARTIFACTSTAGINGDIRECTORY"
+          docker pull --quiet ${{ needs.resolve.outputs.docker_img }}
+          docker run \
+            -v $PWD:/rpcs3 \
+            --env-file .ci/docker.env \
+            -v $CCACHE_DIR:/root/.ccache \
+            -v $BUILD_ARTIFACTSTAGINGDIRECTORY:$ARTDIR \
+            ${{ needs.resolve.outputs.docker_img }} \
+            ${{ needs.resolve.outputs.build_sh }}
+          mkdir -p release
+          cp "$BUILD_ARTIFACTSTAGINGDIRECTORY"/*.AppImage "release/rpcs3-$VERSION-thebigs2-linux64.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: release/
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Save build Ccache
+        if: always() && steps.restore-build-ccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
+
+  release:
+    name: Publish the Release
+    needs: [resolve, windows, linux]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release delete "$TAG" -R "$REPO" --cleanup-tag --yes 2> /dev/null || true
+          gh release create "$TAG" -R "$REPO" --target "$GITHUB_SHA" --latest \
+            --title "RPCS3 $VERSION + The Bigs 2 fix" \
+            --notes "Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741), without the experimental build warning and without the official updater. Windows x64 (zip) and Linux x64 (AppImage, Batocera and Bazzite)." \
+            *
+
+      - name: Keep the newest 5 Releases
+        run: |
+          gh release list -R "$REPO" --limit 100 --json tagName,createdAt \
+            --jq 'map(select(.tagName | endswith("-thebigs2"))) | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          while read -r old; do
+            echo "deleting $old"
+            gh release delete "$old" -R "$REPO" --cleanup-tag --yes
+          done
