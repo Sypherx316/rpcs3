@@ -1,9 +1,10 @@
 # Automatic chain, part 1. Every 4 hours it asks RPCS3's update server for the newest official
 # build; when that version has no Release here yet, it builds it for Windows x64 (MSVC, like the
 # official one) and Linux x64 (clang AppImage: Batocera, Bazzite) with the The Bigs 2 fix
-# (RPCS3 #17741, digant73's 5cdab28), without the experimental build warning and without the
-# official updater, and publishes both as a Release. The PS5 build (a private repository) and the
-# Windows/Batocera updaters take it from there.
+# (RPCS3 #17741, digant73's 5cdab28) and without the experimental build warning, and publishes
+# both as a Release. Its update.json (the official update server's format) is what these builds'
+# own updater reads when RPCS3 starts (no_nags.py), so installed copies update themselves to it.
+# The PS5 build (a private repository) takes it from there.
 #
 # Run workflow, or Re-run all jobs, checks again for the newest build. "force" rebuilds the
 # version even when its Release already exists. The build settings are read from that RPCS3
@@ -111,7 +112,7 @@ jobs:
           path: _thebigs2
           sparse-checkout: .github/thebigs2
 
-      - name: The Bigs 2 fix, no warning, no official updater
+      - name: The Bigs 2 fix, no warning, updates from this fork
         run: |
           python _thebigs2/.github/thebigs2/fix_thebigs2.py rpcs3/Emu/RSX/RSXThread.cpp
           python _thebigs2/.github/thebigs2/no_nags.py
@@ -176,14 +177,16 @@ jobs:
         shell: pwsh
         run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:CLToolPath=${{ env.CCACHE_BIN_DIR }} /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\buildfiles\msvc\ci_only.targets"
 
-      - name: Package as zip
-        # deploy-windows.sh adds the controller, compatibility and translation files to bin/;
-        # the zip (not its 7z) is what the Windows updater unpacks without extra tools
+      - name: Package as zip and 7z
+        # deploy-windows.sh adds the controller, compatibility and translation files to bin/.
+        # The zip is for unpacking by hand; the 7z (packed like the official one) is what RPCS3's
+        # own updater downloads and unpacks
         run: |
           mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
           .ci/deploy-windows.sh
           mkdir -p release
           7z a -tzip -mx7 "release/rpcs3-$VERSION-thebigs2-win64.zip" ./bin/*
+          7z a -m0=LZMA2 -mx9 "release/rpcs3-$VERSION-thebigs2-win64.7z" ./bin/*
 
       - uses: actions/upload-artifact@v4
         with:
@@ -239,7 +242,7 @@ jobs:
           path: _thebigs2
           sparse-checkout: .github/thebigs2
 
-      - name: The Bigs 2 fix, no warning, no official updater
+      - name: The Bigs 2 fix, no warning, updates from this fork
         run: |
           python3 _thebigs2/.github/thebigs2/fix_thebigs2.py rpcs3/Emu/RSX/RSXThread.cpp
           python3 _thebigs2/.github/thebigs2/no_nags.py
@@ -301,12 +304,25 @@ jobs:
       - name: Publish
         run: |
           cd release
+          # What the builds' updater reads (no_nags.py): the official server's latest_build section,
+          # plus the build number it compares with its own
+          win=$(ls *-win64.7z); linux=$(ls *-linux64.AppImage)
+          base="https://github.com/$REPO/releases/download/$TAG"
+          jq -n --arg version "$VERSION" --argjson build "${VERSION##*-}" --arg datetime "$(date -u '+%Y-%m-%d %H:%M:%S')" \
+            --arg win "$base/$win" --argjson win_size "$(stat -c %s "$win")" --arg win_sha "$(sha256sum "$win" | cut -d' ' -f1)" \
+            --arg linux "$base/$linux" --argjson linux_size "$(stat -c %s "$linux")" --arg linux_sha "$(sha256sum "$linux" | cut -d' ' -f1)" \
+            '{thebigs2: 1, return_code: 1,
+              latest_build: {version: $version, build: $build, datetime: $datetime,
+                windows: {download: $win, size: $win_size, checksum: $win_sha},
+                linux: {download: $linux, size: $linux_size, checksum: $linux_sha}},
+              changelog: [{version: $version, title: ("Official RPCS3 " + $version + " + The Bigs 2 fix")}]}' > update.json
+          cat update.json
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release delete "$TAG" -R "$REPO" --cleanup-tag --yes 2> /dev/null || true
           gh release create "$TAG" -R "$REPO" --target "$GITHUB_SHA" --latest \
             --title "RPCS3 $VERSION + The Bigs 2 fix" \
-            --notes "Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741), without the experimental build warning and without the official updater. Windows x64 (zip) and Linux x64 (AppImage, Batocera and Bazzite)." \
+            --notes "Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741) and without the experimental build warning. It updates itself from this fork's Releases (Windows 7z, Linux AppImage). Windows x64 (zip by hand, 7z for the updater) and Linux x64 (AppImage, Batocera and Bazzite)." \
             *
 
       - name: Keep the newest 5 Releases
