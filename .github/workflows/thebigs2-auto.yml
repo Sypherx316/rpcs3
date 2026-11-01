@@ -305,12 +305,13 @@ jobs:
         run: |
           cd release
           # What the builds' updater reads (no_nags.py): the official server's latest_build section,
-          # plus the build number and commit it compares with its own
+          # plus the build number and commit it compares with its own. Checksums in upper case, like
+          # the official server's: RPCS3 compares them with its own upper-case hash as they are
           win=$(ls *-win64.7z); linux=$(ls *-linux64.AppImage)
           base="https://github.com/$REPO/releases/download/$TAG"
           jq -n --arg version "$VERSION" --argjson build "${VERSION##*-}" --arg commit "${SHA:0:8}" --arg datetime "$(date -u '+%Y-%m-%d %H:%M:%S')" \
-            --arg win "$base/$win" --argjson win_size "$(stat -c %s "$win")" --arg win_sha "$(sha256sum "$win" | cut -d' ' -f1)" \
-            --arg linux "$base/$linux" --argjson linux_size "$(stat -c %s "$linux")" --arg linux_sha "$(sha256sum "$linux" | cut -d' ' -f1)" \
+            --arg win "$base/$win" --argjson win_size "$(stat -c %s "$win")" --arg win_sha "$(sha256sum "$win" | cut -d' ' -f1 | tr a-f A-F)" \
+            --arg linux "$base/$linux" --argjson linux_size "$(stat -c %s "$linux")" --arg linux_sha "$(sha256sum "$linux" | cut -d' ' -f1 | tr a-f A-F)" \
             '{thebigs2: 1, return_code: 1,
               latest_build: {version: $version, build: $build, commit: $commit, datetime: $datetime,
                 windows: {download: $win, size: $win_size, checksum: $win_sha},
