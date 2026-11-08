@@ -328,8 +328,8 @@ jobs:
 
       - name: Keep the newest 5 Releases
         run: |
-          gh release list -R "$REPO" --limit 100 --json tagName,createdAt \
-            --jq 'map(select(.tagName | endswith("-thebigs2"))) | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          gh release list -R "$REPO" --limit 100 --json tagName,publishedAt \
+            --jq 'map(select(.tagName | endswith("-thebigs2"))) | sort_by(.publishedAt) | reverse | .[5:] | .[].tagName' |
           while read -r old; do
             echo "deleting $old"
             gh release delete "$old" -R "$REPO" --cleanup-tag --yes
