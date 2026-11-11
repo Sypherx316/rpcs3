@@ -1,15 +1,20 @@
-# Automatic chain, part 1. Every 4 hours it asks RPCS3's update server for the newest official
-# build; when that version has no Release here yet, it builds it for Windows x64 (MSVC, like the
-# official one) and Linux x64 (clang AppImage: Batocera, Bazzite) with the The Bigs 2 fix
-# (RPCS3 #17741, digant73's 5cdab28) and without the experimental build warning, and publishes
-# both as a Release. Its update.json (the official update server's format) is what these builds'
-# own updater reads when RPCS3 starts (no_nags.py), so installed copies update themselves to it.
-# The PS5 build (a private repository) takes it from there.
+# Every 4 hours it asks RPCS3's update server for the newest official build; when that version has
+# no Release here yet, it builds it with the The Bigs 2 fix (RPCS3 #17741, digant73's 5cdab28) for
+#  - Windows x64 (MSVC, like the official one; the 7z RPCS3's own updater unpacks)
+#  - Linux x64 (clang AppImage: Batocera, Bazzite)
+#  - PS5 (lavavex/rpcs3-PS5, RPCS3 as a native PS5 title)
+# and publishes them as one Release with update.json, which all three builds' own updaters read
+# (no_nags.py for PC, ps5_updater.cpp for the PS5), so installed copies update themselves.
+# Only the newest 3 Releases are kept.
+#
+# The PS5 build may not be shared (RPCS3 GPL-2.0-only with PS5_Vulkan/PayloadSDK GPL-3.0), so it
+# is published only encrypted (AES-256-CTR + HMAC-SHA256) with the PS5_KEY secret; the console
+# holds the same key in /data/rpcs3/tb2-update.key. No unencrypted PS5 file is ever uploaded.
 #
 # Run workflow, or Re-run all jobs, checks again for the newest build. "force" rebuilds the
-# version even when its Release already exists. The build settings are read from that RPCS3
+# version even when its Release already exists. The PC build settings are read from that RPCS3
 # revision's own rpcs3.yml, so they follow upstream.
-name: RPCS3 + The Bigs 2 fix (Windows + Linux)
+name: RPCS3 + The Bigs 2 fix (Windows + Linux + PS5)
 
 defaults:
   run:
@@ -177,15 +182,14 @@ jobs:
         shell: pwsh
         run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:CLToolPath=${{ env.CCACHE_BIN_DIR }} /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\buildfiles\msvc\ci_only.targets"
 
-      - name: Package as zip and 7z
+      - name: Package as 7z
         # deploy-windows.sh adds the controller, compatibility and translation files to bin/.
-        # The zip is for unpacking by hand; the 7z (packed like the official one) is what RPCS3's
-        # own updater downloads and unpacks
+        # The 7z (packed like the official one) is what RPCS3's own updater downloads and unpacks;
+        # by hand it opens with 7-Zip or WinRAR
         run: |
           mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
           .ci/deploy-windows.sh
           mkdir -p release
-          7z a -tzip -mx7 "release/rpcs3-$VERSION-thebigs2-win64.zip" ./bin/*
           7z a -m0=LZMA2 -mx9 "release/rpcs3-$VERSION-thebigs2-win64.7z" ./bin/*
 
       - uses: actions/upload-artifact@v4
@@ -285,9 +289,179 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
 
+  ps5:
+    name: PS5 title (RPCS3 ${{ needs.resolve.outputs.version }}, encrypted)
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      # lavavex/rpcs3-PS5 main on 2026-10-09; RPCS3 itself is merged up to the version being built
+      LAVAVEX_REF: e98d7493559d00c4da522c77bc84efe864513b0a
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+      VERSION: ${{ needs.resolve.outputs.version }}
+      UPSTREAM_REF: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - name: Check the PS5_KEY secret
+        env:
+          PS5_KEY: ${{ secrets.PS5_KEY }}
+        run: |
+          [[ ${#PS5_KEY} -eq 128 && $PS5_KEY =~ ^[0-9a-fA-F]+$ ]] || {
+            echo "::error::The PS5_KEY secret (128 hex characters) is missing: the PS5 build is only published encrypted"
+            exit 1
+          }
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
+      - name: Checkout the patch scripts
+        uses: actions/checkout@v4
+        with:
+          path: self
+          sparse-checkout: .github/thebigs2
+
+      - name: Checkout lavavex/rpcs3-PS5
+        uses: actions/checkout@v4
+        with:
+          repository: lavavex/rpcs3-PS5
+          ref: ${{ env.LAVAVEX_REF }}
+          path: rpcs3-PS5
+
+      - name: Build container image (Arch Linux, host tools from lavavex's README)
+        run: |
+          docker build -t ps5build - <<'EOF'
+          FROM archlinux:latest
+          RUN pacman -Syu --noconfirm --needed base-devel clang llvm lld make python python-pip git curl \
+              unzip tar pkgconf cmake ninja nasm glslang spirv-llvm-translator libclc spirv-headers \
+              python-ply python-mako python-markupsafe python-yaml python-packaging meson zstd xz wget \
+              zip which rsync ccache && pacman -Scc --noconfirm
+          RUN git config --global --add safe.directory '*'
+          EOF
+
+      - name: Restore dependency cache
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: rpcs3-PS5/deps
+          key: ps5deps-${{ env.LAVAVEX_REF }}-done
+          restore-keys: ps5deps-${{ env.LAVAVEX_REF }}-
+
+      - name: Fetch sources, merge RPCS3 ${{ env.VERSION }} and apply the fixes
+        run: |
+          docker run --rm -e PIP_BREAK_SYSTEM_PACKAGES -e UPSTREAM_REF -e VERSION -v "$PWD:/w" -w /w/rpcs3-PS5 ps5build bash -euo pipefail -c '
+            p=/w/self/.github/thebigs2
+            bash tools/fetch-deps.sh
+            cd src/rpcs3
+            git fetch -q https://github.com/RPCS3/rpcs3.git "$UPSTREAM_REF"
+            echo "PS5 commits: $(git rev-list --count FETCH_HEAD..HEAD), upstream commits merged: $(git rev-list --count HEAD..FETCH_HEAD)"
+            git -c user.name="ps5 build" -c user.email="ps5-build@users.noreply.github.com" merge --no-edit FETCH_HEAD || true
+            if git rev-parse -q --verify MERGE_HEAD > /dev/null; then
+              python3 $p/resolve_merge.py 3rdparty/CMakeLists.txt
+              git add 3rdparty/CMakeLists.txt
+              if [[ -n $(git diff --name-only --diff-filter=U) ]]; then
+                echo "unresolved conflicts:"; git diff --name-only --diff-filter=U; exit 1
+              fi
+              git -c user.name="ps5 build" -c user.email="ps5-build@users.noreply.github.com" commit -q --no-edit
+            fi
+            git -c submodule.3rdparty/llvm/llvm.update=none -c submodule.3rdparty/ffmpeg.update=none \
+              submodule update --init --recursive --jobs 8
+            python3 $p/ps5_upstream_fixups.py
+            python3 $p/fix_thebigs2.py rpcs3/Emu/RSX/RSXThread.cpp
+            python3 $p/ps5_extras.py "$VERSION"
+            git diff --stat
+          '
+
+      - name: Build dependencies (SDK, RADV, LLVM, zlib, libiconv, FFmpeg)
+        id: deps
+        run: |
+          docker run --rm -e PIP_BREAK_SYSTEM_PACKAGES -v "$PWD:/w" -w /w/rpcs3-PS5 ps5build bash -euo pipefail -c '
+            trap "chmod -R a+rX deps" EXIT
+            # The ps5-opengl SDK 0.3.0 release is gone from GitHub (blackbearreloaded was deleted).
+            # The Internet Archive capture is used instead; build-driver-chain.sh checks the same SHA-256
+            sdk_gl=deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz
+            mkdir -p deps/downloads
+            if [[ ! -f $sdk_gl ]]; then
+              curl --fail --location --retry 5 --retry-delay 30 --retry-all-errors -A "Mozilla/5.0" -o "$sdk_gl.part" \
+                "https://web.archive.org/web/20260928201315id_/https://github.com/blackbearreloaded/ps5-opengl/releases/download/v0.3.0/ps5-opengl-sdk-0.3.0.tar.gz"
+              mv "$sdk_gl.part" "$sdk_gl"
+            fi
+            echo "a7bd6b85f00398eaf8d87ecc58fa0bde7cab79e065acc783268070d2f14b403c  $sdk_gl" | sha256sum --check
+            bash tools/install-sdk.sh
+            bash tools/build-driver-chain.sh
+            bash tools/build-llvm.sh
+            bash tools/build-zlib.sh
+            bash tools/build-libiconv.sh
+            bash tools/build-ffmpeg.sh
+            [[ -f deps/config_database.json ]] || bash tools/update-config-database.sh
+          '
+          df -h /
+
+      # The finished dependencies are kept once; a failed run keeps its progress so the next one resumes
+      - name: Save dependency cache
+        if: steps.deps.outcome == 'success' && steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: rpcs3-PS5/deps
+          key: ps5deps-${{ env.LAVAVEX_REF }}-done
+
+      - name: Save partial dependency cache
+        if: failure() && steps.deps.outcome == 'failure'
+        uses: actions/cache/save@v4
+        with:
+          path: rpcs3-PS5/deps
+          key: ps5deps-${{ env.LAVAVEX_REF }}-partial-${{ github.run_id }}
+
+      - name: Build RPCS3 (PS5 title)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w/rpcs3-PS5 ps5build bash -euo pipefail -c '
+            if ! bash tools/build-rpcs3.sh; then
+              # Keep compiling past the first failure so one run reports every broken file
+              echo "===== ALL BUILD ERRORS"
+              ninja -C build/rpcs3-ps5 -k 0 rpcs3_ps5 2>&1 | grep -E "FAILED:| error:|undefined (symbol|reference)" | sort -u | head -100 || true
+              exit 1
+            fi
+            chmod -R a+rX dist
+            ls -la dist/PPSA99300
+          '
+
+      - name: Package and encrypt
+        # File: "TB2PS5" 01 00 | 16-byte counter | AES-256-CTR(tar.gz of PPSA99300) | HMAC-SHA256 of all before it.
+        # ps5_updater.cpp checks and decrypts it with the same key, kept on the console
+        env:
+          PS5_KEY: ${{ secrets.PS5_KEY }}
+        run: |
+          mkdir -p stage release
+          cp -r rpcs3-PS5/dist/PPSA99300 stage/
+          # CA list for the updater's HTTPS checks
+          cp /etc/ssl/certs/ca-certificates.crt stage/PPSA99300/cacert.pem
+          tar --format=ustar --owner=0 --group=0 -C stage -cf - PPSA99300 | gzip -9 > ps5.tar.gz
+          rm -rf stage rpcs3-PS5/dist
+          out="release/rpcs3-$VERSION-thebigs2-ps5.bin"
+          iv=$(openssl rand -hex 16)
+          printf 'TB2PS5\001\000' > "$out"
+          printf '%s' "$iv" | xxd -r -p >> "$out"
+          openssl enc -aes-256-ctr -K "${PS5_KEY:0:64}" -iv "$iv" -in ps5.tar.gz >> "$out"
+          openssl dgst -sha256 -mac HMAC -macopt "hexkey:${PS5_KEY:64:64}" -binary "$out" >> "$out"
+          rm ps5.tar.gz
+          ls -l release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ps5
+          path: release/
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
   release:
     name: Publish the Release
-    needs: [resolve, windows, linux]
+    needs: [resolve, windows, linux, ps5]
+    # The PC builds are published even when the PS5 one failed
+    if: always() && needs.windows.result == 'success' && needs.linux.result == 'success'
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
@@ -304,33 +478,59 @@ jobs:
       - name: Publish
         run: |
           cd release
-          # What the builds' updater reads (no_nags.py): the official server's latest_build section,
-          # plus the build number and commit it compares with its own. Checksums in upper case, like
-          # the official server's: RPCS3 compares them with its own upper-case hash as they are
+          # What the builds' updaters read: the official server's latest_build section (no_nags.py),
+          # plus the build number and commit it compares with its own, and a "ps5" entry for
+          # ps5_updater.cpp. Checksums in upper case, like the official server's: RPCS3 compares
+          # them with its own upper-case hash as they are
           win=$(ls *-win64.7z); linux=$(ls *-linux64.AppImage)
+          ps5=$(ls *-ps5.bin 2> /dev/null || true)
           base="https://github.com/$REPO/releases/download/$TAG"
+          ps5_entry=null
+          if [[ -n $ps5 ]]; then
+            ps5_entry=$(jq -n --arg version "$VERSION" --argjson build "${VERSION##*-}" --arg url "$base/$ps5" \
+              --argjson size "$(stat -c %s "$ps5")" '{version: $version, build: $build, download: $url, size: $size}')
+          fi
           jq -n --arg version "$VERSION" --argjson build "${VERSION##*-}" --arg commit "${SHA:0:8}" --arg datetime "$(date -u '+%Y-%m-%d %H:%M:%S')" \
             --arg win "$base/$win" --argjson win_size "$(stat -c %s "$win")" --arg win_sha "$(sha256sum "$win" | cut -d' ' -f1 | tr a-f A-F)" \
             --arg linux "$base/$linux" --argjson linux_size "$(stat -c %s "$linux")" --arg linux_sha "$(sha256sum "$linux" | cut -d' ' -f1 | tr a-f A-F)" \
+            --argjson ps5 "$ps5_entry" \
             '{thebigs2: 1, return_code: 1,
-              latest_build: {version: $version, build: $build, commit: $commit, datetime: $datetime,
+              latest_build: ({version: $version, build: $build, commit: $commit, datetime: $datetime,
                 windows: {download: $win, size: $win_size, checksum: $win_sha},
-                linux: {download: $linux, size: $linux_size, checksum: $linux_sha}},
+                linux: {download: $linux, size: $linux_size, checksum: $linux_sha}}
+                + (if $ps5 == null then {} else {ps5: $ps5} end)),
               changelog: [{version: $version, title: ("Official RPCS3 " + $version + " + The Bigs 2 fix")}]}' > update.json
           cat update.json
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          ls -l
+          if [[ -n $ps5 ]]; then
+            ps5_note="PS5 (lavavex/rpcs3-PS5, PPSA99300): encrypted, personal use only; it installs itself on the console that has the key."
+          else
+            ps5_note="PS5: not in this Release (its build failed; it comes with the next one)."
+          fi
           gh release delete "$TAG" -R "$REPO" --cleanup-tag --yes 2> /dev/null || true
           gh release create "$TAG" -R "$REPO" --target "$GITHUB_SHA" --latest \
             --title "RPCS3 $VERSION + The Bigs 2 fix" \
-            --notes "Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741) and without the experimental build warning. It updates itself from this fork's Releases (Windows 7z, Linux AppImage). Windows x64 (zip by hand, 7z for the updater) and Linux x64 (AppImage, Batocera and Bazzite)." \
+            --notes "Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741) and without the experimental build warning. Each build updates itself from this fork's Releases.
+
+          - Windows x64: 7z (opens with 7-Zip or WinRAR)
+          - Linux x64: AppImage (Batocera, Bazzite)
+          - $ps5_note" \
             *
 
-      - name: Keep the newest 5 Releases
+      - name: Keep the newest 3 Releases
         run: |
           gh release list -R "$REPO" --limit 100 --json tagName,publishedAt \
-            --jq 'map(select(.tagName | endswith("-thebigs2"))) | sort_by(.publishedAt) | reverse | .[5:] | .[].tagName' |
+            --jq 'map(select(.tagName | endswith("-thebigs2"))) | sort_by(.publishedAt) | reverse | .[3:] | .[].tagName' |
           while read -r old; do
             echo "deleting $old"
             gh release delete "$old" -R "$REPO" --cleanup-tag --yes
+          done
+          # Releases made before the Windows zip and SHA256SUMS.txt were dropped keep only the 7z
+          gh release list -R "$REPO" --limit 10 --json tagName --jq '.[].tagName | select(endswith("-thebigs2"))' |
+          while read -r tag; do
+            gh release view "$tag" -R "$REPO" --json assets --jq '.assets[].name | select(endswith("-win64.zip") or . == "SHA256SUMS.txt")' |
+            while read -r asset; do
+              echo "$tag: deleting $asset"
+              gh release delete-asset "$tag" "$asset" -R "$REPO" --yes
+            done
           done
