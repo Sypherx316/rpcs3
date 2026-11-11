@@ -350,22 +350,26 @@ jobs:
           key: ps5deps-${{ env.LAVAVEX_REF }}-done
           restore-keys: ps5deps-${{ env.LAVAVEX_REF }}-
 
-      - name: Fetch sources, merge RPCS3 ${{ env.VERSION }} and apply the fixes
+      - name: Fetch sources, put the PS5 port on RPCS3 ${{ env.VERSION }} and apply the fixes
+        # lavavex's port is official 0.0.43-20237 plus 30 PS5 commits. Upstream's history no longer
+        # shares those commits (a merge finds a base from June and conflicts everywhere), so the port's
+        # own changes (20237..port) are applied onto the RPCS3 being built instead
         run: |
           docker run --rm -e PIP_BREAK_SYSTEM_PACKAGES -e UPSTREAM_REF -e VERSION -v "$PWD:/w" -w /w/rpcs3-PS5 ps5build bash -euo pipefail -c '
             p=/w/self/.github/thebigs2
+            port_base=55a3aff337fe2823676c31f2bf44b3dbc39de9fc
             bash tools/fetch-deps.sh
             cd src/rpcs3
+            git diff --binary --ignore-submodules "$port_base" HEAD > /tmp/ps5-port.patch
+            echo "PS5 port: $(git rev-list --count $port_base..HEAD) commits, $(grep -c "^diff --git" /tmp/ps5-port.patch) files"
             git fetch -q https://github.com/RPCS3/rpcs3.git "$UPSTREAM_REF"
-            echo "PS5 commits: $(git rev-list --count FETCH_HEAD..HEAD), upstream commits merged: $(git rev-list --count HEAD..FETCH_HEAD)"
-            git -c user.name="ps5 build" -c user.email="ps5-build@users.noreply.github.com" merge --no-edit FETCH_HEAD || true
-            if git rev-parse -q --verify MERGE_HEAD > /dev/null; then
-              python3 $p/resolve_merge.py 3rdparty/CMakeLists.txt
-              git add 3rdparty/CMakeLists.txt
-              if [[ -n $(git diff --name-only --diff-filter=U) ]]; then
-                echo "unresolved conflicts:"; git diff --name-only --diff-filter=U; exit 1
-              fi
-              git -c user.name="ps5 build" -c user.email="ps5-build@users.noreply.github.com" commit -q --no-edit
+            git checkout -q --detach FETCH_HEAD
+            git log -1 --format="RPCS3 %h %s"
+            git apply --3way /tmp/ps5-port.patch || true
+            [[ -f rpcs3/ps5/main_ps5.cpp ]] || { echo "the PS5 port did not apply"; exit 1; }
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [[ -n $conflicts ]]; then
+              python3 $p/resolve_merge.py $conflicts
             fi
             git -c submodule.3rdparty/llvm/llvm.update=none -c submodule.3rdparty/ffmpeg.update=none \
               submodule update --init --recursive --jobs 8
