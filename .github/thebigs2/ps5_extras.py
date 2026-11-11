@@ -40,6 +40,19 @@ edit("rpcs3/Emu/System.cpp",
      "#endif\n\n",
      "PS5 title: the main thread serves the main-thread queue itself")
 
+# Unmapping a guest shared-memory view (sys_mmapper_unmap_shared_memory) left a hole in the PS5 port,
+# while RPCS3 everywhere but Windows keeps the view in place without access ("remnants of the shm until
+# overwritten") and only ever unmaps the g_base view, never g_sudo: the two views stopped matching and
+# God of War: Ascension read a null pointer right after unmapping its boot buffers. Do what Linux does.
+edit("rpcs3/util/vm_native.cpp",
+     "#elif defined(__PROSPERO__)\n"
+     "\t\t// Give the view back as part of the surrounding reservation\n"
+     "\t\tensure(::ps5_shm_unmap(target, m_size, PS5_SHM_KEEP_RESERVED) == 0, \"ps5_shm_unmap failed\");\n",
+     "#elif defined(__PROSPERO__)\n"
+     "\t\t// As on Linux: keep the view mapped without access, the remnants of the shm stay until overwritten\n"
+     "\t\tensure(::sceKernelMprotect(target, m_size, +protection::no) == 0, \"sceKernelMprotect failed\");\n",
+     "the remnants of the shm stay until overwritten")
+
 main = "rpcs3/ps5/main_ps5.cpp"
 
 # The PS5 frontend never set on_install_pkgs (what installs a disc's packages): same as RPCS3's own frontend
