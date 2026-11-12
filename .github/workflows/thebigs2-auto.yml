@@ -103,6 +103,8 @@ jobs:
       BUILD_SOURCEVERSION: ${{ needs.resolve.outputs.sha }}
       BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/
       VERSION: ${{ needs.resolve.outputs.version }}
+      # The repo has 10 GB of Actions cache: an unbounded Windows Ccache (6.5 GB) pushed the PS5 dependencies out
+      CCACHE_MAXSIZE: 3G
     steps:
       - name: Checkout RPCS3 ${{ needs.resolve.outputs.version }}
         uses: actions/checkout@v4
@@ -200,11 +202,22 @@ jobs:
           if-no-files-found: error
 
       - name: Save build Ccache
+        id: save-build-ccache
         if: always() && steps.restore-build-ccache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
+
+      - name: Delete older Windows Ccaches
+        if: always() && steps.save-build-ccache.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --key thebigs2-win-ccache- -L 100 --json id,key \
+            --jq '.[] | select(.key != "thebigs2-win-ccache-${{ github.run_id }}") | .id' |
+            while read -r id; do gh cache delete "$id" -R "$GITHUB_REPOSITORY" || true; done
 
       - name: Save dependencies cache
         if: always() && steps.restore-dependencies-cache.outputs.cache-hit != 'true'
@@ -283,11 +296,21 @@ jobs:
           if-no-files-found: error
 
       - name: Save build Ccache
+        id: save-build-ccache
         if: always() && steps.restore-build-ccache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
+
+      - name: Delete older Linux Ccaches
+        if: always() && steps.save-build-ccache.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --key thebigs2-linux-ccache- -L 100 --json id,key \
+            --jq '.[] | select(.key != "thebigs2-linux-ccache-${{ github.run_id }}") | .id' |
+            while read -r id; do gh cache delete "$id" -R "$GITHUB_REPOSITORY" || true; done
 
   ps5:
     name: PS5 title (RPCS3 ${{ needs.resolve.outputs.version }}, encrypted)
@@ -350,6 +373,15 @@ jobs:
           key: ps5deps-${{ env.LAVAVEX_REF }}-done
           restore-keys: ps5deps-${{ env.LAVAVEX_REF }}-
 
+      # Kept apart from the dependency cache: the Internet Archive often answers GitHub's runners with
+      # 429, and one good download is then enough even when the big cache is gone
+      - name: Restore the ps5-opengl SDK download
+        id: sdkgl-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: rpcs3-PS5/deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz
+          key: ps5-opengl-sdk-0.3.0-a7bd6b85
+
       - name: Fetch sources, put the PS5 port on RPCS3 ${{ env.VERSION }} and apply the fixes
         # lavavex's port is official 0.0.43-20237 plus 30 PS5 commits. Upstream's history no longer
         # shares those commits (a merge finds a base from June and conflicts everywhere), so the port's
@@ -389,7 +421,7 @@ jobs:
             sdk_gl=deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz
             mkdir -p deps/downloads
             if [[ ! -f $sdk_gl ]]; then
-              curl --fail --location --retry 5 --retry-delay 30 --retry-all-errors -A "Mozilla/5.0" -o "$sdk_gl.part" \
+              curl --fail --location --retry 12 --retry-delay 90 --retry-max-time 1800 --retry-all-errors -A "Mozilla/5.0" -o "$sdk_gl.part" \
                 "https://web.archive.org/web/20260928201315id_/https://github.com/blackbearreloaded/ps5-opengl/releases/download/v0.3.0/ps5-opengl-sdk-0.3.0.tar.gz"
               mv "$sdk_gl.part" "$sdk_gl"
             fi
@@ -404,8 +436,16 @@ jobs:
           '
           df -h /
 
+      - name: Save the ps5-opengl SDK download
+        if: always() && steps.sdkgl-cache.outputs.cache-hit != 'true' && hashFiles('rpcs3-PS5/deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: rpcs3-PS5/deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz
+          key: ps5-opengl-sdk-0.3.0-a7bd6b85
+
       # The finished dependencies are kept once; a failed run keeps its progress so the next one resumes
       - name: Save dependency cache
+        id: save-deps
         if: steps.deps.outcome == 'success' && steps.deps-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -413,11 +453,24 @@ jobs:
           key: ps5deps-${{ env.LAVAVEX_REF }}-done
 
       - name: Save partial dependency cache
+        id: save-partial
         if: failure() && steps.deps.outcome == 'failure'
         uses: actions/cache/save@v4
         with:
           path: rpcs3-PS5/deps
           key: ps5deps-${{ env.LAVAVEX_REF }}-partial-${{ github.run_id }}
+
+      # Only the newest partial cache is useful, and none once the finished one exists
+      - name: Delete stale partial dependency caches
+        if: always() && (steps.save-deps.outcome == 'success' || steps.save-partial.outcome == 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep=ps5deps-${LAVAVEX_REF}-partial-${{ github.run_id }}
+          [[ "${{ steps.save-deps.outcome }}" == success ]] && keep=none
+          gh cache list -R "$GITHUB_REPOSITORY" --key "ps5deps-${LAVAVEX_REF}-partial-" -L 100 --json id,key \
+            --jq ".[] | select(.key != \"$keep\") | .id" |
+            while read -r id; do gh cache delete "$id" -R "$GITHUB_REPOSITORY" || true; done
 
       - name: Build RPCS3 (PS5 title)
         run: |
