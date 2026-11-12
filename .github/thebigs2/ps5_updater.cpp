@@ -463,16 +463,10 @@ namespace ps5_updater
 {
 	void start()
 	{
+		// The PS5 title is built without exceptions: run() reports its own failures
 		std::thread([]()
 		{
-			try
-			{
-				run();
-			}
-			catch (const std::exception& e)
-			{
-				upd_log.error("Updater stopped: %s", e.what());
-			}
+			run();
 		}).detach();
 	}
 }
