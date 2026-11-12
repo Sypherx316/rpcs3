@@ -73,6 +73,31 @@ else:
 
 main = "rpcs3/ps5/main_ps5.cpp"
 
+# RPCS3 expects resolve_path to behave like Qt's canonicalFilePath(), which has no trailing slash:
+# Emulator::Load does resolve_path(".../dev_hdd0/game/") + '/' and cuts that length off the game path.
+# The port returned the path as given, so one more character went: "BCUS98232" became "CUS98232",
+# cellGameBootCheck found no PARAM.SFO, the game got an empty TITLE_ID and God of War: Ascension
+# crashed (reading 0xc) after looking for "/dev_hdd0/game/-DATA".
+edit(main,
+     "\t\t\tconst std::string path(sv);\n"
+     "\t\t\treturn fs::exists(path) ? path : std::string();\n"
+     "\t\t};\n"
+     "\t\tg_emu_callbacks.resolve_path_may_not_exist = [](std::string_view sv) { return std::string(sv); };\n",
+     "\t\t\t// Like QFileInfo::canonicalFilePath(): no trailing slash\n"
+     "\t\t\tstd::string path(sv);\n"
+     "\t\t\twhile (path.size() > 1 && path.back() == '/')\n"
+     "\t\t\t\tpath.pop_back();\n"
+     "\t\t\treturn fs::exists(path) ? path : std::string();\n"
+     "\t\t};\n"
+     "\t\tg_emu_callbacks.resolve_path_may_not_exist = [](std::string_view sv)\n"
+     "\t\t{\n"
+     "\t\t\tstd::string path(sv);\n"
+     "\t\t\twhile (path.size() > 1 && path.back() == '/')\n"
+     "\t\t\t\tpath.pop_back();\n"
+     "\t\t\treturn path;\n"
+     "\t\t};\n",
+     "Like QFileInfo::canonicalFilePath(): no trailing slash")
+
 # The PS5 frontend never set on_install_pkgs (what installs a disc's packages): same as RPCS3's own frontend
 edit(main,
      "\t\tg_emu_callbacks.on_missing_fw = []() { sys_log.error(\"Missing firmware: put PS3UPDAT.PUP in %s\", data_dir); };\n",
