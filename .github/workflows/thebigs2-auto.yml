@@ -382,6 +382,24 @@ jobs:
           path: rpcs3-PS5/deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz
           key: ps5-opengl-sdk-0.3.0-a7bd6b85
 
+      # A copy lives on this repo's "ps5-deps" draft release (never published, so not public)
+      - name: Get the ps5-opengl SDK from the ps5-deps draft release
+        if: steps.sdkgl-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f=rpcs3-PS5/deps/downloads/ps5-opengl-sdk-0.3.0.tar.gz
+          [[ -f $f ]] && exit 0
+          url=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft and .name == "ps5-deps") | .assets[] | select(.name == "ps5-opengl-sdk-0.3.0.tar.gz") | .url' | head -1)
+          if [[ -z $url ]]; then
+            echo "No ps5-deps draft release: the Internet Archive is tried next"
+            exit 0
+          fi
+          mkdir -p "$(dirname "$f")"
+          curl --fail --location --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$f" "$url"
+          echo "a7bd6b85f00398eaf8d87ecc58fa0bde7cab79e065acc783268070d2f14b403c  $f" | sha256sum --check
+
       - name: Fetch sources, put the PS5 port on RPCS3 ${{ env.VERSION }} and apply the fixes
         # lavavex's port is official 0.0.43-20237 plus 30 PS5 commits. Upstream's history no longer
         # shares those commits (a merge finds a base from June and conflicts everywhere), so the port's
