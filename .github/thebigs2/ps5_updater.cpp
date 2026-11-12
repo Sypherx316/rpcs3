@@ -261,7 +261,9 @@ namespace
 
 	bool read_key(u8 aes_key[32], u8 mac_key[32])
 	{
-		const std::string text = fs::file(std::string(key_path)).to_string();
+		// to_string() on a file that did not open is fatal: check first
+		const fs::file key_file{std::string(key_path)};
+		const std::string text = key_file ? key_file.to_string() : std::string();
 		std::string hex;
 		for (char c : text)
 		{
@@ -285,7 +287,8 @@ namespace
 
 	std::string title_dir()
 	{
-		std::string dir = fs::file(std::string(mount_link)).to_string();
+		const fs::file link{std::string(mount_link)};
+		std::string dir = link ? link.to_string() : std::string();
 		while (!dir.empty() && (dir.back() == '\n' || dir.back() == '\r' || dir.back() == ' ' || dir.back() == '\0' || dir.back() == '/'))
 			dir.pop_back();
 		return fs::is_dir(dir) ? dir : std::string(default_title_dir);
@@ -358,6 +361,12 @@ namespace
 			if (!error.empty())
 			{
 				upd_log.error("update.json could not be read: %s", error);
+				return;
+			}
+			// Subscripting a node that is not a map is fatal without exceptions
+			if (!root.IsMap() || !root["latest_build"].IsMap())
+			{
+				upd_log.error("update.json has no latest_build");
 				return;
 			}
 			ps5 = root["latest_build"]["ps5"];
