@@ -53,6 +53,24 @@ edit("rpcs3/util/vm_native.cpp",
      "\t\tensure(::sceKernelMprotect(target, m_size, +protection::no) == 0, \"sceKernelMprotect failed\");\n",
      "the remnants of the shm stay until overwritten")
 
+# Newer RPCS3 reads keyptr (the Qt keyboard pad handler) after the pad loop, outside the guard that the
+# port puts around its declaration: the PS5 title has no Qt keyboard or mouse, so neither is in use
+pad_old = ("\tconst bool keyboard_used = keyptr && keyptr->is_keyboard_used();\n"
+           "\tconst bool mouse_used = keyptr && keyptr->is_mouse_used();\n")
+with open("rpcs3/Input/pad_thread.cpp", encoding="utf-8", newline="") as f:
+    pad_text = f.read()
+if pad_old in pad_text or pad_old.replace("\n", "\r\n") in pad_text:
+    edit("rpcs3/Input/pad_thread.cpp", pad_old,
+         "#if !defined(ANDROID) && !defined(__PROSPERO__)\n" + pad_old +
+         "#else\n"
+         "\t// PS5 title: no Qt keyboard pad handler\n"
+         "\tconst bool keyboard_used = false;\n"
+         "\tconst bool mouse_used = false;\n"
+         "#endif\n",
+         "PS5 title: no Qt keyboard pad handler")
+else:
+    print("rpcs3/Input/pad_thread.cpp: keyptr check not present, nothing to do")
+
 main = "rpcs3/ps5/main_ps5.cpp"
 
 # The PS5 frontend never set on_install_pkgs (what installs a disc's packages): same as RPCS3's own frontend
