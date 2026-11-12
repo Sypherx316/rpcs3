@@ -514,7 +514,8 @@ jobs:
           # CA list for the updater's HTTPS checks
           cp /etc/ssl/certs/ca-certificates.crt stage/PPSA99300/cacert.pem
           tar --format=ustar --owner=0 --group=0 -C stage -cf - PPSA99300 | gzip -9 > ps5.tar.gz
-          rm -rf stage rpcs3-PS5/dist
+          # dist was written by the container as root
+          sudo rm -rf stage rpcs3-PS5/dist
           out="release/rpcs3-$VERSION-thebigs2-ps5.bin"
           iv=$(openssl rand -hex 16)
           printf 'TB2PS5\001\000' > "$out"
