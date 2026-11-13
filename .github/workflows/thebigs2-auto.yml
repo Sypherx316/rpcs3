@@ -583,15 +583,23 @@ jobs:
           else
             ps5_note="PS5: not in this Release (its build failed; it comes with the next one)."
           fi
-          gh release delete "$TAG" -R "$REPO" --cleanup-tag --yes 2> /dev/null || true
-          gh release create "$TAG" -R "$REPO" --target "$GITHUB_SHA" --latest \
-            --title "RPCS3 $VERSION + The Bigs 2 fix" \
-            --notes "Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741) and without the experimental build warning. Each build updates itself from this fork's Releases.
+          notes="Official RPCS3 $VERSION ([$SHA](https://github.com/RPCS3/rpcs3/commit/$SHA)) with the The Bigs 2 fix (RPCS3 #17741) and without the experimental build warning. Each build updates itself from this fork's Releases.
 
           - Windows x64: 7z (opens with 7-Zip or WinRAR)
           - Linux x64: AppImage (Batocera, Bazzite)
-          - $ps5_note" \
-            *
+          - $ps5_note"
+          # An existing Release is edited in place instead of deleted first, so it is not lost when creating the
+          # new one fails. New tags go on the default branch's tip: GITHUB_TOKEN may not create a tag on an older
+          # commit that changes a workflow (HTTP 403 "Resource not accessible by integration")
+          if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
+            gh release edit "$TAG" -R "$REPO" --latest --title "RPCS3 $VERSION + The Bigs 2 fix" --notes "$notes"
+            gh release upload "$TAG" -R "$REPO" --clobber *
+            gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' | while read -r asset; do
+              [[ -e $asset ]] || gh release delete-asset "$TAG" "$asset" -R "$REPO" --yes
+            done
+          else
+            gh release create "$TAG" -R "$REPO" --latest --title "RPCS3 $VERSION + The Bigs 2 fix" --notes "$notes" *
+          fi
 
       - name: Keep the newest 3 Releases
         run: |
