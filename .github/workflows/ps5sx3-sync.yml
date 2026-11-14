@@ -1,9 +1,17 @@
 name: PS5SX3 (The Bigs 2 fix) in the latest Release
 
-# Puts the newest PS5SX3 package from Sypherx316/ps5sx3-thebigs2 (PS5SX3 with the The Bigs 2 fix, encrypted with
-# the PS5 key) into this fork's newest Release, with a line about it in the notes. Runs on its own, so a new RPCS3
-# Release or a new PS5SX3 build both get it within a few hours.
+# Everything updates from this fork's Releases. For PS5SX3 (PPSA99303) this workflow:
+#  1. takes the newest PS5SX3 package built by Sypherx316/ps5sx3-thebigs2 (PS5SX3 with the The Bigs 2 fix,
+#     encrypted with the PS5 key) and attaches it to this fork's newest Release, with a line in the notes;
+#  2. writes ps5sx3/latest.json in this repository: the notice PS5SX3 reads on the console (its
+#     rpcs3/config/update-url.txt points to the raw file, which is served without redirects). Its "zip" is the
+#     package in the newest Release (the console's fetcher adds ".tb2"); the same file goes into the Release.
+# It runs after each run of the main workflow (a new Release gets the package at once) and every 6 hours
+# (a new PS5SX3 build).
 on:
+  workflow_run:
+    workflows: ["RPCS3 + The Bigs 2 fix (Windows + Linux + PS5)"]
+    types: [completed]
   schedule:
     - cron: "41 */6 * * *"
   workflow_dispatch:
@@ -22,32 +30,42 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      FEED: https://raw.githubusercontent.com/Sypherx316/ps5sx3-thebigs2/main/feed/latest.json
+      SOURCE: https://raw.githubusercontent.com/Sypherx316/ps5sx3-thebigs2/main/feed/latest.json
     steps:
-      - name: Attach the package and update the notes
+      - uses: actions/checkout@v4
+
+      - name: Attach the package to the newest Release
+        id: attach
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 "$FEED" -o latest.json
-          build=$(jq -r .build latest.json)
-          size=$(jq -r .size latest.json)
+          curl -fsSL --retry 3 "$SOURCE" -o source.json
+          build=$(jq -r .build source.json)
+          size=$(jq -r .size source.json)
           [[ $build =~ ^TB[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::unexpected build name: $build"; exit 1; }
           tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
-          asset="PS5SX3-$build-thebigs2-fix.zip.tb2"
+          base="PS5SX3-$build-thebigs2-fix.zip"
+          asset="$base.tb2"
           echo "PS5SX3 $build -> $tag ($asset)"
 
           names=$(gh release view "$tag" -R "$REPO" --json assets --jq '.assets[].name')
           if ! grep -qxF "$asset" <<< "$names"; then
-            curl -fsSL --retry 3 "$(jq -r .zip latest.json).tb2" -o "$asset"
+            curl -fsSL --retry 3 "$(jq -r .zip source.json).tb2" -o "$asset"
             # The package is the zip plus 56 bytes (header 8, counter 16, HMAC 32)
             [ "$(stat -c %s "$asset")" -eq $((size + 56)) ] || { echo "::error::the package has the wrong size"; exit 1; }
             gh release upload "$tag" -R "$REPO" "$asset"
           fi
-          # Only the newest PS5SX3 package stays
+          # Only the newest PS5SX3 package stays in the Release
           grep -E '^PS5SX3-.*-thebigs2-fix\.zip\.tb2$' <<< "$names" | grep -vxF "$asset" |
             while read -r old; do gh release delete-asset "$tag" "$old" -R "$REPO" --yes; done || true
 
+          # The notice for the console: the developer's build, size and SHA-256 of the fixed zip, served from here
+          mkdir -p ps5sx3
+          jq --arg zip "https://github.com/$REPO/releases/download/$tag/$base" '.zip = $zip' source.json > ps5sx3/latest.json
+          cp ps5sx3/latest.json ps5sx3-latest.json
+          gh release upload "$tag" -R "$REPO" ps5sx3-latest.json --clobber
+
           gh release view "$tag" -R "$REPO" --json body --jq .body > body.md
-          line="- PS5SX3 $build (PPSA99303) with the The Bigs 2 fix: encrypted, personal use only. On the console it updates itself from [ps5sx3-thebigs2](https://github.com/Sypherx316/ps5sx3-thebigs2), which follows the official PS5SX3 builds by Sword."
+          line="- PS5SX3 $build (PPSA99303) with the The Bigs 2 fix: encrypted, personal use only. On the console it updates itself from this page (ps5sx3/latest.json); built by [ps5sx3-thebigs2](https://github.com/Sypherx316/ps5sx3-thebigs2) from the official PS5SX3 builds by Sword."
           python3 - "$line" <<'EOF'
           import sys
           line = sys.argv[1]
@@ -58,3 +76,22 @@ jobs:
           EOF
           gh release edit "$tag" -R "$REPO" --notes-file body.md
           gh release view "$tag" -R "$REPO" --json assets --jq '.assets[] | "\(.name) \(.size)"'
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Update ps5sx3/latest.json in the repository
+        env:
+          BUILD: ${{ steps.attach.outputs.build }}
+          TAG: ${{ steps.attach.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git add ps5sx3/latest.json
+          if git diff --cached --quiet; then echo "ps5sx3/latest.json is current"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "ps5sx3: PS5SX3 $BUILD in $TAG"
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
