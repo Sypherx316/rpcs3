@@ -1,0 +1,9 @@
+{
+  "build": "TB20",
+  "number": 20,
+  "hotfix": 0,
+  "zip": "https://github.com/Sypherx316/rpcs3/releases/download/v0.0.43-20583-thebigs2/PS5SX3-TB20-thebigs2-fix.zip",
+  "size": 49805958,
+  "sha256": "c382838beeb9b08935bd518b12783ef5e94308de29ebee35ade54b615b9699c0",
+  "notes": "God of War: Ascension crash fix, 1.12 unlocked to 60 with frame generation, GTA IV faster, savestate fixes, PS5 Pro memory pool, notification pictures | The Bigs 2 crowd fix applied"
+}
