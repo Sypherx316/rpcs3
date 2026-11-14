@@ -1,0 +1,60 @@
+name: PS5SX3 (The Bigs 2 fix) in the latest Release
+
+# Puts the newest PS5SX3 package from Sypherx316/ps5sx3-thebigs2 (PS5SX3 with the The Bigs 2 fix, encrypted with
+# the PS5 key) into this fork's newest Release, with a line about it in the notes. Runs on its own, so a new RPCS3
+# Release or a new PS5SX3 build both get it within a few hours.
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ps5sx3-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      FEED: https://raw.githubusercontent.com/Sypherx316/ps5sx3-thebigs2/main/feed/latest.json
+    steps:
+      - name: Attach the package and update the notes
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 "$FEED" -o latest.json
+          build=$(jq -r .build latest.json)
+          size=$(jq -r .size latest.json)
+          [[ $build =~ ^TB[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::unexpected build name: $build"; exit 1; }
+          tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          asset="PS5SX3-$build-thebigs2-fix.zip.tb2"
+          echo "PS5SX3 $build -> $tag ($asset)"
+
+          names=$(gh release view "$tag" -R "$REPO" --json assets --jq '.assets[].name')
+          if ! grep -qxF "$asset" <<< "$names"; then
+            curl -fsSL --retry 3 "$(jq -r .zip latest.json).tb2" -o "$asset"
+            # The package is the zip plus 56 bytes (header 8, counter 16, HMAC 32)
+            [ "$(stat -c %s "$asset")" -eq $((size + 56)) ] || { echo "::error::the package has the wrong size"; exit 1; }
+            gh release upload "$tag" -R "$REPO" "$asset"
+          fi
+          # Only the newest PS5SX3 package stays
+          grep -E '^PS5SX3-.*-thebigs2-fix\.zip\.tb2$' <<< "$names" | grep -vxF "$asset" |
+            while read -r old; do gh release delete-asset "$tag" "$old" -R "$REPO" --yes; done || true
+
+          gh release view "$tag" -R "$REPO" --json body --jq .body > body.md
+          line="- PS5SX3 $build (PPSA99303) with the The Bigs 2 fix: encrypted, personal use only. On the console it updates itself from [ps5sx3-thebigs2](https://github.com/Sypherx316/ps5sx3-thebigs2), which follows the official PS5SX3 builds by Sword."
+          python3 - "$line" <<'EOF'
+          import sys
+          line = sys.argv[1]
+          lines = open("body.md").read().rstrip("\n").split("\n")
+          lines = [l for l in lines if not l.startswith("- PS5SX3 ")]
+          lines.append(line)
+          open("body.md", "w").write("\n".join(lines) + "\n")
+          EOF
+          gh release edit "$tag" -R "$REPO" --notes-file body.md
+          gh release view "$tag" -R "$REPO" --json assets --jq '.assets[] | "\(.name) \(.size)"'
