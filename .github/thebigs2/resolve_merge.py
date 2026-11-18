@@ -19,9 +19,28 @@ def vk_preload_shaders(ours, theirs):
     return None
 
 
+def jit_advancing_reserve(ours, theirs):
+    # Upstream now reserves each JIT memory manager at an advancing fixed address and retries until one
+    # is free. On the PS5 a refused fixed reservation would make that loop spin forever, and the port's
+    # memory_reserve already places JIT memory in its own advancing range: keep the port's call there
+    if "s_min_memory_reserve_addr" in ours and "JIT memory manager: out of address space" in theirs:
+        return "#ifdef __PROSPERO__\n" + theirs + "#else\n" + ours.rstrip("\n") + "\n#endif\n\n"
+    return None
+
+
+def vm_memory_reset_removed(ours, theirs):
+    # Upstream removed utils::memory_reset() (nothing calls it any more), the port had added a PS5 branch
+    # to it: upstream's version as it is. The port's PS5 branch of memory_decommit merges on its own
+    if not ours.strip() and "void memory_reset(" in theirs:
+        return ours
+    return None
+
+
 RULES = {
     "3rdparty/CMakeLists.txt": [cmake_glew_guard],
     "rpcs3/Emu/RSX/VK/VKGSRender.cpp": [vk_preload_shaders],
+    "Utilities/JITLLVM.cpp": [jit_advancing_reserve],
+    "rpcs3/util/vm_native.cpp": [vm_memory_reset_removed],
 }
 
 
