@@ -17,6 +17,18 @@ def edit(path, old, new, marker, count=1):
     print(f"{path}: fixed")
 
 
+# hidapi 0.16 (upstream 2fab75f) builds its new hidraw backend on FreeBSD by default, and that backend
+# wants a system libusb through pkg-config, which the PS5 SDK has not: keep the libusb backend there
+edit("3rdparty/hidapi/CMakeLists.txt",
+     "\tadd_library(3rdparty_hidapi INTERFACE)\n\tadd_subdirectory(hidapi EXCLUDE_FROM_ALL)\n",
+     "\tif(PS5)\n"
+     "\t\t# hidapi's FreeBSD hidraw backend needs a system libusb (pkg-config): use its libusb backend\n"
+     "\t\tset(HIDAPI_WITH_HIDRAW FALSE CACHE BOOL \"Don't build hidapi's hidraw backend for the PS5\")\n"
+     "\tendif()\n"
+     "\n"
+     "\tadd_library(3rdparty_hidapi INTERFACE)\n\tadd_subdirectory(hidapi EXCLUDE_FROM_ALL)\n",
+     "Don't build hidapi's hidraw backend for the PS5")
+
 # Upstream links 3rdparty::hidapi into rpcs3_emu, so hidapi's libusb backend is now built for the PS5.
 # The PS5 compiler reports an old __FreeBSD__, and hid.c then redefines libusb_get_string_descriptor,
 # a fallback meant only for FreeBSD < 10 (libusb.h already has it inline).
