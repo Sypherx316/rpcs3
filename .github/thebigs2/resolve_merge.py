@@ -14,8 +14,27 @@ def cmake_glew_guard(ours, theirs):
 def vk_preload_shaders(ours, theirs):
     # Upstream moved shader preloading into preload_shaders() and only calls it when a game boots, which
     # is what the port's "no interpreter precompile for the menu" did: upstream's version as it is
-    if ours.startswith("void VKGSRender::preload_shaders()") and "hosting_game" in theirs:
+    # (upstream's lines before it, e.g. the end of on_init_thread(), can end up in the same block)
+    if "void VKGSRender::preload_shaders()" in ours and "hosting_game" in theirs:
         return ours
+    return None
+
+
+def pad_openxr_includes(ours, theirs):
+    # Upstream added the OpenXR pad handler includes right after ps_move_handler.h, where the port closes
+    # its "no HID handlers on the PS5" block: close the PS5 block, then upstream's lines (all of OpenXR
+    # is behind HAVE_OPENXR, which the PS5 build does not set)
+    if '#include "openxr_handler.h"' in ours and theirs.strip() == "#endif":
+        return theirs + ours
+    return None
+
+
+def pad_openxr_case(ours, theirs):
+    # Same in get_pad_handler(): upstream's "case pad_handler::openxr" (and its #ifdef HAVE_OPENXR) lands
+    # where the port ends its PS5 #else; the #endif after the block closes the PS5 one, so close
+    # HAVE_OPENXR here
+    if "case pad_handler::openxr:" in ours and "#ifdef HAVE_OPENXR" in ours and not theirs.strip():
+        return ours + "#endif\n"
     return None
 
 
@@ -41,6 +60,7 @@ RULES = {
     "rpcs3/Emu/RSX/VK/VKGSRender.cpp": [vk_preload_shaders],
     "Utilities/JITLLVM.cpp": [jit_advancing_reserve],
     "rpcs3/util/vm_native.cpp": [vm_memory_reset_removed],
+    "rpcs3/Input/pad_thread.cpp": [pad_openxr_includes, pad_openxr_case],
 }
 
 
