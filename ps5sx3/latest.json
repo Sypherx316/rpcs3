@@ -2,7 +2,7 @@
   "build": "TB22.1",
   "number": 22,
   "hotfix": 1,
-  "zip": "https://github.com/Sypherx316/rpcs3/releases/download/v0.0.43-20640-thebigs2/PS5SX3-TB22.1-thebigs2-fix.zip",
+  "zip": "https://github.com/Sypherx316/rpcs3/releases/download/v0.0.43-20644-thebigs2/PS5SX3-TB22.1-thebigs2-fix.zip",
   "size": 49969856,
   "sha256": "cf98d7e6036e17c9546f0b8239cd380fe251f7eda515b1180811b529e4097e64",
   "notes": "Lossless Scaling frame generation (your own Lossless.dll in rpcs3/lossless), NIS and SGSR upscalers, upscaling options fixed | The Bigs 2 crowd fix applied"
