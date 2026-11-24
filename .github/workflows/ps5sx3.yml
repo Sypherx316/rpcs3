@@ -1,0 +1,248 @@
+name: PS5SX3 + The Bigs 2 fix
+
+# PS5SX3 (PPSA99303, Sword's PS5 build of RPCS3) with the The Bigs 2 fix, published in this fork's newest Release.
+# The tools are in .github/ps5sx3 (see its README.md). Every 6 hours, and after each run of the RPCS3 workflow:
+#  1. asks the PS5SX3 developer's update server for the newest build;
+#  2. if the newest Release does not have it yet (a new PS5SX3 build, or a new Release of RPCS3), downloads it,
+#     applies the fix to its eboot.bin, puts the console-side fetcher in the zip, encrypts it with PS5_KEY and
+#     attaches it as PS5SX3-<build>-thebigs2-fix.zip.tb2 (only the newest PS5SX3 package stays in that Release);
+#  3. writes ps5sx3/latest.json, the notice PS5SX3 reads on the console (rpcs3/config/update-url.txt points to its
+#     raw address, served without redirects); its "zip" is that package without ".tb2", which the fetcher adds.
+# A build the fix does not recognise is never published: the run fails (GitHub sends an e-mail) and the console stays
+# on the build it has. If a new Release of RPCS3 comes out meanwhile, the package the console has is copied into it.
+# "dry_run", and every push that changes .github/ps5sx3, builds the developer's current build without publishing
+# anything and compares it with the package the console has.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_run:
+    workflows: ["RPCS3 + The Bigs 2 fix (Windows + Linux + PS5)"]
+    types: [completed]
+  push:
+    branches: [master]
+    paths: ['.github/ps5sx3/**', '.github/workflows/ps5sx3.yml']
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build again even if the newest Release already has this PS5SX3 build
+        type: boolean
+        default: false
+      dry_run:
+        description: Build only, publish nothing, and compare with the package the console has
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ps5sx3
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ps5sx3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run == true }}
+      FORCE: ${{ github.event_name == 'push' || inputs.force == true || inputs.dry_run == true }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Only what this needs, not RPCS3's sources
+          sparse-checkout: |
+            .github/ps5sx3
+            ps5sx3
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Anything new?
+        id: check
+        run: |
+          set -euo pipefail
+          theirs=$(curl -fsS --retry 3 https://ps5sx3-updates.ps5sx2.workers.dev/latest.json | jq -r .build)
+          [[ $theirs =~ ^TB[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::unexpected build name from the developer: $theirs"; exit 1; }
+          have=$(jq -r '.build // empty' ps5sx3/latest.json 2>/dev/null || true)
+          tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          names=$(gh release view "$tag" -R "$REPO" --json assets --jq '.assets[].name')
+          echo "developer: $theirs; the console's notice: ${have:-nothing}; newest Release: $tag"
+          if [ "$FORCE" = true ]; then
+            go=true
+          elif [ "$theirs" != "$have" ]; then
+            go=true
+          elif ! grep -qxF "PS5SX3-$have-thebigs2-fix.zip.tb2" <<< "$names"; then
+            echo "$tag does not have PS5SX3 $have yet"
+            go=true
+          else
+            echo "nothing to do"
+            go=false
+          fi
+          { echo "go=$go"; echo "have=$have"; echo "tag=$tag"; } >> "$GITHUB_OUTPUT"
+
+      - name: Tools
+        if: steps.check.outputs.go == 'true'
+        run: |
+          pip install --quiet capstone==5.0.6 keystone-engine==0.9.2 cryptography
+          wget -q https://github.com/ps5-payload-dev/pacbrew-repo/releases/latest/download/ps5-payload-dev.tar.gz
+          sudo tar xf ps5-payload-dev.tar.gz -C /
+          rm ps5-payload-dev.tar.gz
+          sudo apt-get install -y -qq clang-18 lld-18 >/dev/null
+
+      - name: Build the console-side fetcher
+        if: steps.check.outputs.go == 'true'
+        working-directory: .github/ps5sx3
+        run: |
+          export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          make -C installer
+          python3 installer/check_elf.py installer/PS5SX3-Installer.elf
+
+      - name: Build the update
+        id: build
+        if: steps.check.outputs.go == 'true'
+        working-directory: .github/ps5sx3
+        env:
+          PS5_KEY: ${{ secrets.PS5_KEY }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          if [ ${#PS5_KEY} -ne 128 ]; then
+            echo "::error::The PS5_KEY secret is missing. Run: gh secret set PS5_KEY -R $REPO < your-key-file"
+            exit 1
+          fi
+          set +e
+          python build_update.py --out out --installer installer/PS5SX3-Installer.elf \
+            --zip-base "https://github.com/$REPO/releases/download/$TAG"
+          code=$?
+          set -e
+          if [ "$code" = 0 ]; then
+            build=$(jq -r .build out/latest.json)
+            mv "out/PS5SX3-$build.zip.tb2" "out/PS5SX3-$build-thebigs2-fix.zip.tb2"
+            jq --arg zip "https://github.com/$REPO/releases/download/$TAG/PS5SX3-$build-thebigs2-fix.zip" \
+              '.zip = $zip' out/latest.json > out/notice.json
+            cat out/build-info.json
+            { echo "built=true"; echo "build=$build"; } >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::The new PS5SX3 build could not be fixed automatically. Nothing was published; the console stays on the build it has."
+          fi
+
+      - name: Compare with the package the console has
+        if: steps.build.outputs.built == 'true' && env.DRY_RUN == 'true'
+        working-directory: .github/ps5sx3
+        env:
+          PS5_KEY: ${{ secrets.PS5_KEY }}
+          BUILD: ${{ steps.build.outputs.build }}
+          HAVE: ${{ steps.check.outputs.have }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD" != "$HAVE" ]; then
+            echo "The developer's $BUILD is not published yet (the console has ${HAVE:-nothing}): nothing to compare."
+            exit 0
+          fi
+          curl -fsSL --retry 3 "$(jq -r .zip ../../ps5sx3/latest.json).tb2" -o published.tb2
+          python compare.py published.tb2 "out/PS5SX3-$BUILD-thebigs2-fix.zip.tb2"
+
+      - name: Publish in the newest Release
+        id: publish
+        if: steps.build.outputs.built == 'true' && env.DRY_RUN != 'true'
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+          BUILD: ${{ steps.build.outputs.build }}
+        run: |
+          set -euo pipefail
+          asset="PS5SX3-$BUILD-thebigs2-fix.zip.tb2"
+          gh release upload "$TAG" -R "$REPO" ".github/ps5sx3/out/$asset" --clobber
+          # Only the newest PS5SX3 package stays in the Release
+          gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' |
+            grep -E '^PS5SX3-.*-thebigs2-fix\.zip\.tb2$' | grep -vxF "$asset" |
+            while read -r old; do gh release delete-asset "$TAG" "$old" -R "$REPO" --yes; done || true
+          cp .github/ps5sx3/out/notice.json ps5sx3/latest.json
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the console's package in the newest Release
+        # The developer's build could not be published but a new Release of RPCS3 may have come out: the package
+        # the console has is copied into it from the Release the notice names
+        id: carry
+        if: ${{ !cancelled() && steps.check.outputs.go == 'true' && steps.build.outputs.built != 'true' && env.DRY_RUN != 'true' }}
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+          HAVE: ${{ steps.check.outputs.have }}
+        run: |
+          set -euo pipefail
+          [ -n "$HAVE" ] || exit 0
+          asset="PS5SX3-$HAVE-thebigs2-fix.zip.tb2"
+          if gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name' | grep -qxF "$asset"; then
+            echo "$TAG already has $asset"
+            exit 0
+          fi
+          src="$(jq -r .zip ps5sx3/latest.json).tb2"
+          size=$(jq -r .size ps5sx3/latest.json)
+          if ! curl -fsSL --retry 3 "$src" -o "$RUNNER_TEMP/$asset"; then
+            echo "::error::$src is not there any more: $TAG has no PS5SX3 until the next build is published"
+            exit 0
+          fi
+          # The package is the zip plus 56 bytes (header 8, counter 16, HMAC 32)
+          [ "$(stat -c %s "$RUNNER_TEMP/$asset")" -eq $((size + 56)) ] || { echo "::error::the package has the wrong size"; exit 1; }
+          gh release upload "$TAG" -R "$REPO" "$RUNNER_TEMP/$asset"
+          jq --arg zip "https://github.com/$REPO/releases/download/$TAG/${asset%.tb2}" '.zip = $zip' ps5sx3/latest.json > "$RUNNER_TEMP/notice.json"
+          cp "$RUNNER_TEMP/notice.json" ps5sx3/latest.json
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      - name: Notice and notes in the Release
+        if: ${{ !cancelled() && (steps.publish.outputs.done == 'true' || steps.carry.outputs.done == 'true') }}
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          build=$(jq -r .build ps5sx3/latest.json)
+          cp ps5sx3/latest.json "$RUNNER_TEMP/ps5sx3-latest.json"
+          gh release upload "$TAG" -R "$REPO" "$RUNNER_TEMP/ps5sx3-latest.json" --clobber
+          gh release view "$TAG" -R "$REPO" --json body --jq .body > "$RUNNER_TEMP/body.md"
+          line="- PS5SX3 $build (PPSA99303) with the The Bigs 2 fix: encrypted, personal use only. On the console it updates itself from this page (ps5sx3/latest.json); made in this fork ([.github/ps5sx3](https://github.com/$REPO/tree/master/.github/ps5sx3)) from the official PS5SX3 builds by Sword."
+          python3 - "$line" "$RUNNER_TEMP/body.md" <<'EOF'
+          import sys
+          line, path = sys.argv[1], sys.argv[2]
+          lines = open(path).read().rstrip("\n").split("\n")
+          lines = [l for l in lines if not l.startswith("- PS5SX3 ")]
+          lines.append(line)
+          open(path, "w").write("\n".join(lines) + "\n")
+          EOF
+          gh release edit "$TAG" -R "$REPO" --notes-file "$RUNNER_TEMP/body.md"
+          gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[] | "\(.name) \(.size)"'
+
+      - name: Commit the notice
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ps5sx3/latest.json
+          if ! git diff --cached --quiet; then
+            git commit -m "ps5sx3: PS5SX3 $(jq -r .build ps5sx3/latest.json) in $TAG"
+          else
+            # GitHub switches a schedule off after 60 days without a commit
+            age=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+            [ "$age" -ge 45 ] || exit 0
+            date -u +%Y-%m-%dT%H:%M:%SZ > ps5sx3/last-check.txt
+            git add ps5sx3/last-check.txt
+            git commit -m "ps5sx3: still checking"
+          fi
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
+
+      - name: Result
+        if: ${{ !cancelled() && steps.check.outputs.go == 'true' && steps.build.outputs.built != 'true' }}
+        run: |
+          echo "::error::PS5SX3 was not built (see the steps above); nothing new was published."
+          exit 1
