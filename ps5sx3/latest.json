@@ -1,9 +1,9 @@
 {
-  "build": "TB22.1",
-  "number": 22,
+  "build": "TB24.1",
+  "number": 24,
   "hotfix": 1,
-  "zip": "https://github.com/Sypherx316/rpcs3/releases/download/v0.0.43-20644-thebigs2/PS5SX3-TB22.1-thebigs2-fix.zip",
-  "size": 49969856,
-  "sha256": "cf98d7e6036e17c9546f0b8239cd380fe251f7eda515b1180811b529e4097e64",
-  "notes": "Lossless Scaling frame generation (your own Lossless.dll in rpcs3/lossless), NIS and SGSR upscalers, upscaling options fixed | The Bigs 2 crowd fix applied"
+  "zip": "https://github.com/Sypherx316/rpcs3/releases/download/v0.0.43-20644-thebigs2/PS5SX3-TB24.1-thebigs2-fix.zip",
+  "size": 50555400,
+  "sha256": "df31dd2b3374ebec407bbf196de72a1aa3c57a12b4fb6c226c799c307f039c9c",
+  "notes": "Fixes games crashing about 10 seconds into their start while signed in to RPCN | The Bigs 2 crowd fix applied"
 }
